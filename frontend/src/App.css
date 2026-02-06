@@ -131,7 +131,7 @@
 
 .controls {
   display: grid;
-  grid-template-columns: 1fr 220px auto;
+  grid-template-columns: minmax(220px, 1fr) repeat(4, minmax(160px, 220px)) auto;
   gap: 1rem;
   align-items: end;
 }
@@ -333,6 +333,14 @@ button:disabled {
   align-items: flex-end;
 }
 
+.status-select {
+  min-width: 140px;
+}
+
+.task-card.is-dragging {
+  opacity: 0.5;
+}
+
 .task-edit {
   display: grid;
   gap: 0.6rem;
@@ -343,6 +351,90 @@ button:disabled {
   border: 1px dashed var(--border);
   border-radius: 16px;
   text-align: center;
+  color: var(--muted);
+}
+
+.empty-state--compact {
+  padding: 1.2rem;
+  font-size: 0.9rem;
+}
+
+.board {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.board-column {
+  border-radius: 18px;
+  border: 1px dashed var(--border);
+  padding: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  background: rgba(255, 255, 255, 0.7);
+  min-height: 260px;
+  transition: border 0.2s ease, box-shadow 0.2s ease;
+}
+
+.board-column.is-over {
+  border-color: var(--accent);
+  box-shadow: 0 12px 24px rgba(255, 122, 69, 0.15);
+}
+
+.board-column-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.board-column-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-family: 'Bricolage Grotesque', sans-serif;
+}
+
+.board-drop {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  min-height: 180px;
+}
+
+.board .task-card {
+  cursor: grab;
+}
+
+.board .task-card:active {
+  cursor: grabbing;
+}
+
+.board .task-actions {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
+  width: 100%;
+}
+
+.pagination {
+  margin-top: 1.2rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.page-indicator {
+  font-weight: 600;
   color: var(--muted);
 }
 

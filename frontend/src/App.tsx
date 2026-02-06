@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState, type DragEvent, type FormEvent } from 'react'
 import './App.css'
 
 type TaskStatus = 'todo' | 'doing' | 'done'
+type SortOrder = 'newest' | 'oldest'
 
 type Task = {
   id: number
@@ -12,6 +13,25 @@ type Task = {
   updated_at: string
 }
 
+type TaskResponse = {
+  data: Task[]
+  meta: {
+    current_page: number
+    last_page: number
+    per_page: number
+    total: number
+    from: number | null
+    to: number | null
+  }
+}
+
+type TaskStats = {
+  total: number
+  todo: number
+  doing: number
+  done: number
+}
+
 const STATUS_LABEL: Record<TaskStatus, string> = {
   todo: 'To do',
   doing: 'In progress',
@@ -19,24 +39,6 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
 }
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
-
-const matchesFilters = (
-  task: Task,
-  search: string,
-  statusFilter: 'all' | TaskStatus,
-) => {
-  if (statusFilter !== 'all' && task.status !== statusFilter) {
-    return false
-  }
-
-  const normalizedSearch = search.trim().toLowerCase()
-  if (!normalizedSearch) {
-    return true
-  }
-
-  const haystack = `${task.title} ${task.description ?? ''}`.toLowerCase()
-  return haystack.includes(normalizedSearch)
-}
 
 function App() {
   const [tasks, setTasks] = useState<Task[]>([])
@@ -46,6 +48,12 @@ function App() {
 
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | TaskStatus>('all')
+  const [page, setPage] = useState(1)
+  const [perPage, setPerPage] = useState(8)
+  const [sortOrder, setSortOrder] = useState<SortOrder>('newest')
+  const [meta, setMeta] = useState<TaskResponse['meta'] | null>(null)
+  const [stats, setStats] = useState<TaskStats | null>(null)
+  const [viewMode, setViewMode] = useState<'list' | 'board'>('list')
 
   const [form, setForm] = useState({
     title: '',
@@ -63,15 +71,28 @@ function App() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [savingId, setSavingId] = useState<number | null>(null)
   const [deletingId, setDeletingId] = useState<number | null>(null)
+  const [statusUpdatingId, setStatusUpdatingId] = useState<number | null>(null)
+  const [draggingId, setDraggingId] = useState<number | null>(null)
+  const [dragOverStatus, setDragOverStatus] = useState<TaskStatus | null>(null)
   const [refreshToken, setRefreshToken] = useState(0)
 
-  const stats = useMemo(() => {
+  const fallbackStats = useMemo(() => {
     const total = tasks.length
     const todo = tasks.filter((task) => task.status === 'todo').length
     const doing = tasks.filter((task) => task.status === 'doing').length
     const done = tasks.filter((task) => task.status === 'done').length
     return { total, todo, doing, done }
   }, [tasks])
+  const displayStats = stats ?? fallbackStats
+
+  const tasksByStatus = useMemo(
+    () => ({
+      todo: tasks.filter((task) => task.status === 'todo'),
+      doing: tasks.filter((task) => task.status === 'doing'),
+      done: tasks.filter((task) => task.status === 'done'),
+    }),
+    [tasks],
+  )
 
   const showNotice = (message: string) => {
     setNotice(message)
@@ -79,31 +100,64 @@ function App() {
   }
 
   useEffect(() => {
+    setPage(1)
+  }, [query, statusFilter, perPage, sortOrder])
+
+  useEffect(() => {
     const controller = new AbortController()
-    const params = new URLSearchParams()
+    const listParams = new URLSearchParams()
+    const statsParams = new URLSearchParams()
     if (query.trim()) {
-      params.set('search', query.trim())
+      listParams.set('search', query.trim())
+      statsParams.set('search', query.trim())
     }
     if (statusFilter !== 'all') {
-      params.set('status', statusFilter)
+      listParams.set('status', statusFilter)
+      statsParams.set('status', statusFilter)
     }
 
-    const url = `${API_BASE}/api/tasks${params.toString() ? `?${params}` : ''}`
+    listParams.set('page', String(page))
+    listParams.set('per_page', String(perPage))
+    listParams.set('sort', sortOrder)
+
+    const listUrl = `${API_BASE}/api/tasks${listParams.toString() ? `?${listParams}` : ''}`
+    const statsUrl = `${API_BASE}/api/tasks/stats${
+      statsParams.toString() ? `?${statsParams}` : ''
+    }`
+
     const timer = window.setTimeout(() => {
       setLoading(true)
       setError(null)
-      fetch(url, {
-        signal: controller.signal,
-        headers: { Accept: 'application/json' },
-      })
-        .then(async (response) => {
-          if (!response.ok) {
-            const text = await response.text()
+      Promise.all([
+        fetch(listUrl, {
+          signal: controller.signal,
+          headers: { Accept: 'application/json' },
+        }),
+        fetch(statsUrl, {
+          signal: controller.signal,
+          headers: { Accept: 'application/json' },
+        }),
+      ])
+        .then(async ([listResponse, statsResponse]) => {
+          if (!listResponse.ok) {
+            const text = await listResponse.text()
             throw new Error(text || 'Gagal memuat data.')
           }
-          return response.json()
+          const listData: TaskResponse = await listResponse.json()
+          let statsData: TaskStats | null = null
+          if (statsResponse.ok) {
+            statsData = await statsResponse.json()
+          }
+          return { listData, statsData }
         })
-        .then((data: Task[]) => setTasks(data))
+        .then(({ listData, statsData }) => {
+          setTasks(listData.data)
+          setMeta(listData.meta)
+          setStats(statsData)
+          if (listData.meta.last_page > 0 && page > listData.meta.last_page) {
+            setPage(listData.meta.last_page)
+          }
+        })
         .catch((err: Error) => {
           if (err.name !== 'AbortError') {
             setError('Gagal memuat data. Pastikan backend Laravel aktif.')
@@ -116,7 +170,7 @@ function App() {
       controller.abort()
       window.clearTimeout(timer)
     }
-  }, [query, statusFilter, refreshToken])
+  }, [query, statusFilter, page, perPage, sortOrder, refreshToken])
 
   const handleCreate = async (event: FormEvent) => {
     event.preventDefault()
@@ -147,11 +201,13 @@ function App() {
         throw new Error(payload?.message ?? 'Gagal menambahkan task.')
       }
 
-      const created: Task = await response.json()
-      if (matchesFilters(created, query, statusFilter)) {
-        setTasks((prev) => [created, ...prev])
-      }
+      await response.json()
       setForm({ title: '', description: '', status: 'todo' })
+      if (sortOrder === 'newest' && page !== 1) {
+        setPage(1)
+      } else {
+        setRefreshToken((prev) => prev + 1)
+      }
       showNotice('Task baru berhasil dibuat.')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Terjadi kesalahan.')
@@ -201,20 +257,76 @@ function App() {
         throw new Error(payload?.message ?? 'Gagal memperbarui task.')
       }
 
-      const updated: Task = await response.json()
-      setTasks((prev) => {
-        const next = prev.map((task) => (task.id === taskId ? updated : task))
-        return matchesFilters(updated, query, statusFilter)
-          ? next
-          : next.filter((task) => task.id !== taskId)
-      })
+      await response.json()
       setEditingId(null)
+      setRefreshToken((prev) => prev + 1)
       showNotice('Task berhasil diperbarui.')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Terjadi kesalahan.')
     } finally {
       setSavingId(null)
     }
+  }
+
+  const handleStatusUpdate = async (taskId: number, nextStatus: TaskStatus) => {
+    const task = tasks.find((item) => item.id === taskId)
+    if (!task || task.status === nextStatus) {
+      return
+    }
+
+    setStatusUpdatingId(taskId)
+    setError(null)
+
+    try {
+      const response = await fetch(`${API_BASE}/api/tasks/${taskId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ status: nextStatus }),
+      })
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null)
+        throw new Error(payload?.message ?? 'Gagal memperbarui status.')
+      }
+
+      await response.json()
+      showNotice('Status task berhasil diperbarui.')
+      setRefreshToken((prev) => prev + 1)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Terjadi kesalahan.')
+    } finally {
+      setStatusUpdatingId(null)
+    }
+  }
+
+  const handleDragStart = (taskId: number) => (event: DragEvent<HTMLElement>) => {
+    setDraggingId(taskId)
+    event.dataTransfer.setData('text/plain', String(taskId))
+    event.dataTransfer.effectAllowed = 'move'
+  }
+
+  const handleDragEnd = () => {
+    setDraggingId(null)
+    setDragOverStatus(null)
+  }
+
+  const handleDragOver = (status: TaskStatus) => (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    setDragOverStatus(status)
+  }
+
+  const handleDrop = (status: TaskStatus) => async (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    const droppedId = draggingId ?? Number(event.dataTransfer.getData('text/plain'))
+    setDragOverStatus(null)
+    setDraggingId(null)
+    if (!droppedId) {
+      return
+    }
+    await handleStatusUpdate(droppedId, status)
   }
 
   const handleDelete = async (taskId: number) => {
@@ -236,7 +348,11 @@ function App() {
         throw new Error('Gagal menghapus task.')
       }
 
-      setTasks((prev) => prev.filter((task) => task.id !== taskId))
+      if (tasks.length === 1 && page > 1) {
+        setPage(page - 1)
+      } else {
+        setRefreshToken((prev) => prev + 1)
+      }
       showNotice('Task berhasil dihapus.')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Terjadi kesalahan.')
@@ -247,6 +363,118 @@ function App() {
 
   const formatDate = (value: string) =>
     new Intl.DateTimeFormat('id-ID', { dateStyle: 'medium' }).format(new Date(value))
+
+  const listSummary = loading
+    ? 'Memuat...'
+    : meta
+      ? `Halaman ${meta.current_page} dari ${meta.last_page} - ${meta.total} task`
+      : `${tasks.length} task ditampilkan`
+
+  const panelSummary =
+    viewMode === 'board'
+      ? 'Tarik kartu ke kolom status untuk memperbarui.'
+      : listSummary
+
+  const renderTaskCard = (task: Task, mode: 'list' | 'board') => {
+    const isEditing = editingId === task.id
+    const isDragging = draggingId === task.id
+    const canDrag = mode === 'board' && !isEditing && statusUpdatingId !== task.id
+
+    return (
+      <article
+        key={task.id}
+        className={`task-card status-${task.status}${isDragging ? ' is-dragging' : ''}`}
+        draggable={canDrag}
+        onDragStart={canDrag ? handleDragStart(task.id) : undefined}
+        onDragEnd={canDrag ? handleDragEnd : undefined}
+      >
+        <div className="task-main">
+          <div className="task-meta">
+            <span className={`badge badge-${task.status}`}>{STATUS_LABEL[task.status]}</span>
+            <span className="tiny">Dibuat {formatDate(task.created_at)}</span>
+          </div>
+          {isEditing ? (
+            <div className="task-edit">
+              <input
+                value={editForm.title}
+                onChange={(event) =>
+                  setEditForm((prev) => ({ ...prev, title: event.target.value }))
+                }
+              />
+              <textarea
+                rows={3}
+                value={editForm.description}
+                onChange={(event) =>
+                  setEditForm((prev) => ({
+                    ...prev,
+                    description: event.target.value,
+                  }))
+                }
+              />
+              <select
+                value={editForm.status}
+                onChange={(event) =>
+                  setEditForm((prev) => ({
+                    ...prev,
+                    status: event.target.value as TaskStatus,
+                  }))
+                }
+              >
+                <option value="todo">To do</option>
+                <option value="doing">In progress</option>
+                <option value="done">Done</option>
+              </select>
+            </div>
+          ) : (
+            <>
+              <h3>{task.title}</h3>
+              <p>{task.description || 'Tidak ada deskripsi.'}</p>
+            </>
+          )}
+        </div>
+        <div className="task-actions">
+          {isEditing ? (
+            <>
+              <button className="ghost" onClick={cancelEdit} disabled={savingId === task.id}>
+                Batal
+              </button>
+              <button onClick={() => handleUpdate(task.id)} disabled={savingId === task.id}>
+                {savingId === task.id ? 'Menyimpan...' : 'Simpan'}
+              </button>
+            </>
+          ) : (
+            <>
+              {mode === 'list' ? (
+                <select
+                  className="status-select"
+                  value={task.status}
+                  onChange={(event) =>
+                    handleStatusUpdate(task.id, event.target.value as TaskStatus)
+                  }
+                  disabled={statusUpdatingId === task.id}
+                  aria-label="Ubah status"
+                >
+                  <option value="todo">To do</option>
+                  <option value="doing">In progress</option>
+                  <option value="done">Done</option>
+                </select>
+              ) : null}
+              <button className="ghost" onClick={() => startEdit(task)}>
+                Edit
+              </button>
+              <button
+                className="danger"
+                onClick={() => handleDelete(task.id)}
+                disabled={deletingId === task.id}
+              >
+                {deletingId === task.id ? 'Menghapus...' : 'Hapus'}
+              </button>
+            </>
+          )}
+        </div>
+      </article>
+    )
+  }
 
   return (
     <div className="app">
@@ -280,19 +508,19 @@ function App() {
       <section className="stats">
         <div className="stat-card">
           <p>Total Task</p>
-          <h3>{stats.total}</h3>
+          <h3>{displayStats.total}</h3>
         </div>
         <div className="stat-card">
           <p>To do</p>
-          <h3>{stats.todo}</h3>
+          <h3>{displayStats.todo}</h3>
         </div>
         <div className="stat-card">
           <p>In progress</p>
-          <h3>{stats.doing}</h3>
+          <h3>{displayStats.doing}</h3>
         </div>
         <div className="stat-card">
           <p>Done</p>
-          <h3>{stats.done}</h3>
+          <h3>{displayStats.done}</h3>
         </div>
       </section>
 
@@ -317,6 +545,41 @@ function App() {
             <option value="todo">To do</option>
             <option value="doing">In progress</option>
             <option value="done">Done</option>
+          </select>
+        </div>
+        <div className="control">
+          <label htmlFor="sort">Urutkan</label>
+          <select
+            id="sort"
+            value={sortOrder}
+            onChange={(event) => setSortOrder(event.target.value as SortOrder)}
+          >
+            <option value="newest">Terbaru dulu</option>
+            <option value="oldest">Terlama dulu</option>
+          </select>
+        </div>
+        <div className="control">
+          <label htmlFor="perPage">Jumlah per halaman</label>
+          <select
+            id="perPage"
+            value={perPage}
+            onChange={(event) => setPerPage(Number(event.target.value))}
+          >
+            <option value={6}>6</option>
+            <option value={8}>8</option>
+            <option value={12}>12</option>
+            <option value={20}>20</option>
+          </select>
+        </div>
+        <div className="control">
+          <label htmlFor="view">Tampilan</label>
+          <select
+            id="view"
+            value={viewMode}
+            onChange={(event) => setViewMode(event.target.value as 'list' | 'board')}
+          >
+            <option value="list">List</option>
+            <option value="board">Board</option>
           </select>
         </div>
         <button className="ghost" onClick={() => setRefreshToken((prev) => prev + 1)}>
@@ -369,101 +632,93 @@ function App() {
         <section className="panel list-panel">
           <div className="panel-header">
             <h2>Daftar Task</h2>
-            <span className="tiny">
-              {loading ? 'Memuat...' : `${tasks.length} task ditampilkan`}
-            </span>
+            <span className="tiny">{panelSummary}</span>
           </div>
 
-          <div className="task-list">
-            {loading ? (
-              <div className="empty-state">Memuat data dari server...</div>
-            ) : tasks.length === 0 ? (
-              <div className="empty-state">Belum ada task. Buat yang pertama!</div>
-            ) : (
-              tasks.map((task) => (
-                <article key={task.id} className={`task-card status-${task.status}`}>
-                  <div className="task-main">
-                    <div className="task-meta">
-                      <span className={`badge badge-${task.status}`}>
-                        {STATUS_LABEL[task.status]}
-                      </span>
-                      <span className="tiny">Dibuat {formatDate(task.created_at)}</span>
-                    </div>
-                    {editingId === task.id ? (
-                      <div className="task-edit">
-                        <input
-                          value={editForm.title}
-                          onChange={(event) =>
-                            setEditForm((prev) => ({ ...prev, title: event.target.value }))
-                          }
-                        />
-                        <textarea
-                          rows={3}
-                          value={editForm.description}
-                          onChange={(event) =>
-                            setEditForm((prev) => ({
-                              ...prev,
-                              description: event.target.value,
-                            }))
-                          }
-                        />
-                        <select
-                          value={editForm.status}
-                          onChange={(event) =>
-                            setEditForm((prev) => ({
-                              ...prev,
-                              status: event.target.value as TaskStatus,
-                            }))
-                          }
-                        >
-                          <option value="todo">To do</option>
-                          <option value="doing">In progress</option>
-                          <option value="done">Done</option>
-                        </select>
+          {viewMode === 'list' ? (
+            <div className="task-list">
+              {loading ? (
+                <div className="empty-state">Memuat data dari server...</div>
+              ) : tasks.length === 0 ? (
+                <div className="empty-state">Belum ada task. Buat yang pertama!</div>
+              ) : (
+                tasks.map((task) => renderTaskCard(task, 'list'))
+              )}
+            </div>
+          ) : loading ? (
+            <div className="empty-state">Memuat data dari server...</div>
+          ) : (
+            <div className="board">
+              {(['todo', 'doing', 'done'] as TaskStatus[]).map((status) => (
+                <div
+                  key={status}
+                  className={`board-column${dragOverStatus === status ? ' is-over' : ''}`}
+                >
+                  <div className="board-column-header">
+                    <h3>{STATUS_LABEL[status]}</h3>
+                    <span className="tiny">{tasksByStatus[status].length} task</span>
+                  </div>
+                  <div
+                    className="board-drop"
+                    onDragOver={handleDragOver(status)}
+                    onDragLeave={() => setDragOverStatus(null)}
+                    onDrop={handleDrop(status)}
+                  >
+                    {tasksByStatus[status].length === 0 ? (
+                      <div className="empty-state empty-state--compact">
+                        Belum ada task.
                       </div>
                     ) : (
-                      <>
-                        <h3>{task.title}</h3>
-                        <p>{task.description || 'Tidak ada deskripsi.'}</p>
-                      </>
+                      tasksByStatus[status].map((task) => renderTaskCard(task, 'board'))
                     )}
                   </div>
-                  <div className="task-actions">
-                    {editingId === task.id ? (
-                      <>
-                        <button
-                          className="ghost"
-                          onClick={cancelEdit}
-                          disabled={savingId === task.id}
-                        >
-                          Batal
-                        </button>
-                        <button
-                          onClick={() => handleUpdate(task.id)}
-                          disabled={savingId === task.id}
-                        >
-                          {savingId === task.id ? 'Menyimpan...' : 'Simpan'}
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <button className="ghost" onClick={() => startEdit(task)}>
-                          Edit
-                        </button>
-                        <button
-                          className="danger"
-                          onClick={() => handleDelete(task.id)}
-                          disabled={deletingId === task.id}
-                        >
-                          {deletingId === task.id ? 'Menghapus...' : 'Hapus'}
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </article>
-              ))
-            )}
-          </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {meta ? (
+            <div className="pagination">
+              <span className="tiny">
+                Menampilkan {meta.from ?? 0}-{meta.to ?? 0} dari {meta.total} task
+              </span>
+              <div className="pager">
+                <button
+                  className="ghost"
+                  onClick={() => setPage(1)}
+                  disabled={loading || meta.current_page <= 1}
+                >
+                  Awal
+                </button>
+                <button
+                  className="ghost"
+                  onClick={() => setPage((current) => Math.max(1, current - 1))}
+                  disabled={loading || meta.current_page <= 1}
+                >
+                  Sebelumnya
+                </button>
+                <span className="page-indicator">
+                  Halaman {meta.current_page} / {meta.last_page || 1}
+                </span>
+                <button
+                  className="ghost"
+                  onClick={() =>
+                    setPage((current) => Math.min(meta.last_page || 1, current + 1))
+                  }
+                  disabled={loading || meta.current_page >= meta.last_page}
+                >
+                  Berikutnya
+                </button>
+                <button
+                  className="ghost"
+                  onClick={() => setPage(meta.last_page || 1)}
+                  disabled={loading || meta.current_page >= meta.last_page}
+                >
+                  Akhir
+                </button>
+              </div>
+            </div>
+          ) : null}
         </section>
       </div>
     </div>
