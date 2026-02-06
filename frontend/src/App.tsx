@@ -32,6 +32,17 @@ type TaskStats = {
   done: number
 }
 
+type AuthUser = {
+  id: number
+  name: string
+  email: string
+}
+
+type AuthResponse = {
+  user: AuthUser
+  token: string
+}
+
 const STATUS_LABEL: Record<TaskStatus, string> = {
   todo: 'To do',
   doing: 'In progress',
@@ -39,8 +50,21 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
 }
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
+const TOKEN_STORAGE_KEY = 'task_studio_token'
 
 function App() {
+  const [authToken, setAuthToken] = useState<string | null>(null)
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null)
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
+  const [authForm, setAuthForm] = useState({
+    name: '',
+    email: '',
+    password: '',
+    passwordConfirm: '',
+  })
+  const [authLoading, setAuthLoading] = useState(false)
+  const [authChecking, setAuthChecking] = useState(false)
+
   const [tasks, setTasks] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -84,6 +108,8 @@ function App() {
     return { total, todo, doing, done }
   }, [tasks])
   const displayStats = stats ?? fallbackStats
+  const isAuthenticated = Boolean(currentUser)
+  const isBoardView = viewMode === 'board'
 
   const tasksByStatus = useMemo(
     () => ({
@@ -99,11 +125,77 @@ function App() {
     window.setTimeout(() => setNotice(null), 2600)
   }
 
+  const clearSession = () => {
+    setAuthToken(null)
+    setCurrentUser(null)
+    setTasks([])
+    setMeta(null)
+    setStats(null)
+    window.localStorage.removeItem(TOKEN_STORAGE_KEY)
+  }
+
+  const buildHeaders = (
+    extra?: Record<string, string>,
+    includeAuth = true,
+  ): Record<string, string> => ({
+    Accept: 'application/json',
+    ...(extra ?? {}),
+    ...(includeAuth && authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+  })
+
+  const apiFetch = (path: string, options: RequestInit = {}, includeAuth = true) =>
+    fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers: buildHeaders(
+        options.headers as Record<string, string> | undefined,
+        includeAuth,
+      ),
+    })
+
+  useEffect(() => {
+    const storedToken = window.localStorage.getItem(TOKEN_STORAGE_KEY)
+    if (storedToken) {
+      setAuthToken(storedToken)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!authToken) {
+      setCurrentUser(null)
+      return
+    }
+
+    const controller = new AbortController()
+    setAuthChecking(true)
+    apiFetch('/api/auth/me', { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error('UNAUTHORIZED')
+        }
+        return response.json()
+      })
+      .then((user: AuthUser) => setCurrentUser(user))
+      .catch(() => {
+        clearSession()
+      })
+      .finally(() => setAuthChecking(false))
+
+    return () => controller.abort()
+  }, [authToken])
+
   useEffect(() => {
     setPage(1)
   }, [query, statusFilter, perPage, sortOrder])
 
   useEffect(() => {
+    if (!authToken) {
+      setLoading(false)
+      setTasks([])
+      setMeta(null)
+      setStats(null)
+      return
+    }
+
     const controller = new AbortController()
     const listParams = new URLSearchParams()
     const statsParams = new URLSearchParams()
@@ -116,29 +208,31 @@ function App() {
       statsParams.set('status', statusFilter)
     }
 
-    listParams.set('page', String(page))
-    listParams.set('per_page', String(perPage))
+    const effectivePage = isBoardView ? 1 : page
+    const effectivePerPage = isBoardView ? 200 : perPage
+
+    listParams.set('page', String(effectivePage))
+    listParams.set('per_page', String(effectivePerPage))
     listParams.set('sort', sortOrder)
 
-    const listUrl = `${API_BASE}/api/tasks${listParams.toString() ? `?${listParams}` : ''}`
-    const statsUrl = `${API_BASE}/api/tasks/stats${
-      statsParams.toString() ? `?${statsParams}` : ''
-    }`
+    const listPath = `/api/tasks${listParams.toString() ? `?${listParams}` : ''}`
+    const statsPath = `/api/tasks/stats${statsParams.toString() ? `?${statsParams}` : ''}`
 
     const timer = window.setTimeout(() => {
       setLoading(true)
       setError(null)
       Promise.all([
-        fetch(listUrl, {
+        apiFetch(listPath, {
           signal: controller.signal,
-          headers: { Accept: 'application/json' },
         }),
-        fetch(statsUrl, {
+        apiFetch(statsPath, {
           signal: controller.signal,
-          headers: { Accept: 'application/json' },
         }),
       ])
         .then(async ([listResponse, statsResponse]) => {
+          if (listResponse.status === 401) {
+            throw new Error('UNAUTHORIZED')
+          }
           if (!listResponse.ok) {
             const text = await listResponse.text()
             throw new Error(text || 'Gagal memuat data.')
@@ -159,9 +253,15 @@ function App() {
           }
         })
         .catch((err: Error) => {
-          if (err.name !== 'AbortError') {
-            setError('Gagal memuat data. Pastikan backend Laravel aktif.')
+          if (err.name === 'AbortError') {
+            return
           }
+          if (err.message === 'UNAUTHORIZED') {
+            clearSession()
+            setError('Silakan login terlebih dahulu.')
+            return
+          }
+          setError('Gagal memuat data. Pastikan backend Laravel aktif.')
         })
         .finally(() => setLoading(false))
     }, 320)
@@ -170,10 +270,99 @@ function App() {
       controller.abort()
       window.clearTimeout(timer)
     }
-  }, [query, statusFilter, page, perPage, sortOrder, refreshToken])
+  }, [authToken, query, statusFilter, page, perPage, sortOrder, refreshToken, isBoardView])
+
+  const handleAuthSubmit = async (event: FormEvent) => {
+    event.preventDefault()
+    setError(null)
+
+    if (!authForm.email.trim() || !authForm.password.trim()) {
+      setError('Email dan password wajib diisi.')
+      return
+    }
+
+    if (authMode === 'register') {
+      if (!authForm.name.trim()) {
+        setError('Nama wajib diisi.')
+        return
+      }
+      if (authForm.password.length < 6) {
+        setError('Password minimal 6 karakter.')
+        return
+      }
+      if (authForm.password !== authForm.passwordConfirm) {
+        setError('Konfirmasi password tidak sama.')
+        return
+      }
+    }
+
+    setAuthLoading(true)
+
+    try {
+      const response = await apiFetch(
+        `/api/auth/${authMode}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            authMode === 'register'
+              ? {
+                  name: authForm.name.trim(),
+                  email: authForm.email.trim(),
+                  password: authForm.password,
+                  password_confirmation: authForm.passwordConfirm,
+                }
+              : {
+                  email: authForm.email.trim(),
+                  password: authForm.password,
+                },
+          ),
+        },
+        false,
+      )
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null)
+        throw new Error(payload?.message ?? 'Gagal memproses autentikasi.')
+      }
+
+      const data: AuthResponse = await response.json()
+      setAuthToken(data.token)
+      setCurrentUser(data.user)
+      window.localStorage.setItem(TOKEN_STORAGE_KEY, data.token)
+      setAuthForm({ name: '', email: '', password: '', passwordConfirm: '' })
+      showNotice(authMode === 'register' ? 'Registrasi berhasil.' : 'Login berhasil.')
+      setRefreshToken((prev) => prev + 1)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Terjadi kesalahan.')
+    } finally {
+      setAuthLoading(false)
+    }
+  }
+
+  const handleLogout = async () => {
+    if (!authToken) {
+      return
+    }
+
+    setAuthLoading(true)
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' })
+    } catch {
+      // ignore logout failures
+    } finally {
+      clearSession()
+      setAuthLoading(false)
+      showNotice('Logout berhasil.')
+    }
+  }
 
   const handleCreate = async (event: FormEvent) => {
     event.preventDefault()
+    if (!authToken) {
+      setError('Silakan login terlebih dahulu.')
+      return
+    }
     if (!form.title.trim()) {
       setError('Judul task wajib diisi.')
       return
@@ -183,12 +372,9 @@ function App() {
     setError(null)
 
     try {
-      const response = await fetch(`${API_BASE}/api/tasks`, {
+      const response = await apiFetch('/api/tasks', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: form.title.trim(),
           description: form.description.trim() || null,
@@ -230,6 +416,10 @@ function App() {
   }
 
   const handleUpdate = async (taskId: number) => {
+    if (!authToken) {
+      setError('Silakan login terlebih dahulu.')
+      return
+    }
     if (!editForm.title.trim()) {
       setError('Judul task wajib diisi.')
       return
@@ -239,12 +429,9 @@ function App() {
     setError(null)
 
     try {
-      const response = await fetch(`${API_BASE}/api/tasks/${taskId}`, {
+      const response = await apiFetch(`/api/tasks/${taskId}`, {
         method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: editForm.title.trim(),
           description: editForm.description.trim() || null,
@@ -269,6 +456,10 @@ function App() {
   }
 
   const handleStatusUpdate = async (taskId: number, nextStatus: TaskStatus) => {
+    if (!authToken) {
+      setError('Silakan login terlebih dahulu.')
+      return
+    }
     const task = tasks.find((item) => item.id === taskId)
     if (!task || task.status === nextStatus) {
       return
@@ -278,12 +469,9 @@ function App() {
     setError(null)
 
     try {
-      const response = await fetch(`${API_BASE}/api/tasks/${taskId}`, {
+      const response = await apiFetch(`/api/tasks/${taskId}`, {
         method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: nextStatus }),
       })
 
@@ -330,6 +518,10 @@ function App() {
   }
 
   const handleDelete = async (taskId: number) => {
+    if (!authToken) {
+      setError('Silakan login terlebih dahulu.')
+      return
+    }
     const confirmed = window.confirm('Hapus task ini? Tindakan tidak bisa dibatalkan.')
     if (!confirmed) {
       return
@@ -339,9 +531,8 @@ function App() {
     setError(null)
 
     try {
-      const response = await fetch(`${API_BASE}/api/tasks/${taskId}`, {
+      const response = await apiFetch(`/api/tasks/${taskId}`, {
         method: 'DELETE',
-        headers: { Accept: 'application/json' },
       })
 
       if (!response.ok) {
@@ -364,11 +555,13 @@ function App() {
   const formatDate = (value: string) =>
     new Intl.DateTimeFormat('id-ID', { dateStyle: 'medium' }).format(new Date(value))
 
-  const listSummary = loading
-    ? 'Memuat...'
-    : meta
-      ? `Halaman ${meta.current_page} dari ${meta.last_page} - ${meta.total} task`
-      : `${tasks.length} task ditampilkan`
+  const listSummary = !authToken
+    ? 'Silakan login terlebih dahulu.'
+    : loading
+      ? 'Memuat...'
+      : meta
+        ? `Halaman ${meta.current_page} dari ${meta.last_page} - ${meta.total} task`
+        : `${tasks.length} task ditampilkan`
 
   const panelSummary =
     viewMode === 'board'
@@ -487,18 +680,120 @@ function App() {
             kehilangan detail kecil.
           </p>
         </div>
-        <div className="hero-card">
-          <div className="hero-card-header">
-            <span>API Endpoint</span>
-            <span className={`dot ${error ? 'dot--error' : 'dot--ok'}`} />
+        <div className="hero-side">
+          <div className="hero-card">
+            <div className="hero-card-header">
+              <span>API Endpoint</span>
+              <span className={`dot ${error ? 'dot--error' : 'dot--ok'}`} />
+            </div>
+            <p className="mono">{API_BASE}/api/tasks</p>
+            <p className="tiny">
+              Pastikan backend Laravel berjalan di{' '}
+              <span className="mono">http://localhost:8000</span>.
+            </p>
+            <button className="ghost" onClick={() => setRefreshToken((prev) => prev + 1)}>
+              Refresh Data
+            </button>
           </div>
-          <p className="mono">{API_BASE}/api/tasks</p>
-          <p className="tiny">
-            Pastikan backend Laravel berjalan di <span className="mono">http://localhost:8000</span>.
-          </p>
-          <button className="ghost" onClick={() => setRefreshToken((prev) => prev + 1)}>
-            Refresh Data
-          </button>
+          <div className="hero-card auth-card">
+            <div className="hero-card-header">
+              <span>Akun</span>
+              <span className={`dot ${isAuthenticated ? 'dot--ok' : 'dot--error'}`} />
+            </div>
+            {authChecking ? (
+              <p className="tiny">Memeriksa sesi...</p>
+            ) : currentUser ? (
+              <>
+                <div className="auth-user">
+                  <p className="auth-name">{currentUser.name}</p>
+                  <p className="tiny">{currentUser.email}</p>
+                </div>
+                <button className="ghost" onClick={handleLogout} disabled={authLoading}>
+                  {authLoading ? 'Memproses...' : 'Logout'}
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="auth-toggle">
+                  <button
+                    type="button"
+                    className={`ghost ${authMode === 'login' ? 'is-active' : ''}`}
+                    onClick={() => {
+                      setAuthMode('login')
+                      setError(null)
+                    }}
+                  >
+                    Login
+                  </button>
+                  <button
+                    type="button"
+                    className={`ghost ${authMode === 'register' ? 'is-active' : ''}`}
+                    onClick={() => {
+                      setAuthMode('register')
+                      setError(null)
+                    }}
+                  >
+                    Register
+                  </button>
+                </div>
+                <form className="auth-form" onSubmit={handleAuthSubmit}>
+                  {authMode === 'register' ? (
+                    <input
+                      value={authForm.name}
+                      onChange={(event) =>
+                        setAuthForm((prev) => ({ ...prev, name: event.target.value }))
+                      }
+                      placeholder="Nama lengkap"
+                      autoComplete="name"
+                      disabled={authLoading}
+                    />
+                  ) : null}
+                  <input
+                    type="email"
+                    value={authForm.email}
+                    onChange={(event) =>
+                      setAuthForm((prev) => ({ ...prev, email: event.target.value }))
+                    }
+                    placeholder="Email"
+                    autoComplete="email"
+                    disabled={authLoading}
+                  />
+                  <input
+                    type="password"
+                    value={authForm.password}
+                    onChange={(event) =>
+                      setAuthForm((prev) => ({ ...prev, password: event.target.value }))
+                    }
+                    placeholder="Password"
+                    autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
+                    disabled={authLoading}
+                  />
+                  {authMode === 'register' ? (
+                    <input
+                      type="password"
+                      value={authForm.passwordConfirm}
+                      onChange={(event) =>
+                        setAuthForm((prev) => ({
+                          ...prev,
+                          passwordConfirm: event.target.value,
+                        }))
+                      }
+                      placeholder="Konfirmasi password"
+                      autoComplete="new-password"
+                      disabled={authLoading}
+                    />
+                  ) : null}
+                  <button type="submit" disabled={authLoading}>
+                    {authLoading
+                      ? 'Memproses...'
+                      : authMode === 'register'
+                        ? 'Buat Akun'
+                        : 'Login'}
+                  </button>
+                </form>
+              </>
+            )}
+          </div>
         </div>
       </header>
 
@@ -597,6 +892,7 @@ function App() {
                 value={form.title}
                 onChange={(event) => setForm((prev) => ({ ...prev, title: event.target.value }))}
                 placeholder="Contoh: Finalisasi desain landing page"
+                disabled={!authToken}
               />
             </label>
             <label>
@@ -608,6 +904,7 @@ function App() {
                   setForm((prev) => ({ ...prev, description: event.target.value }))
                 }
                 placeholder="Tuliskan detail singkat untuk membantu fokus."
+                disabled={!authToken}
               />
             </label>
             <label>
@@ -617,15 +914,19 @@ function App() {
                 onChange={(event) =>
                   setForm((prev) => ({ ...prev, status: event.target.value as TaskStatus }))
                 }
+                disabled={!authToken}
               >
                 <option value="todo">To do</option>
                 <option value="doing">In progress</option>
                 <option value="done">Done</option>
               </select>
             </label>
-            <button type="submit" disabled={isSubmitting}>
+            <button type="submit" disabled={isSubmitting || !authToken}>
               {isSubmitting ? 'Menyimpan...' : 'Tambah Task'}
             </button>
+            {!authToken ? (
+              <p className="tiny">Login dulu untuk menambah task baru.</p>
+            ) : null}
           </form>
         </section>
 
@@ -637,7 +938,9 @@ function App() {
 
           {viewMode === 'list' ? (
             <div className="task-list">
-              {loading ? (
+              {!authToken ? (
+                <div className="empty-state">Silakan login untuk melihat task.</div>
+              ) : loading ? (
                 <div className="empty-state">Memuat data dari server...</div>
               ) : tasks.length === 0 ? (
                 <div className="empty-state">Belum ada task. Buat yang pertama!</div>
@@ -645,6 +948,8 @@ function App() {
                 tasks.map((task) => renderTaskCard(task, 'list'))
               )}
             </div>
+          ) : !authToken ? (
+            <div className="empty-state">Silakan login untuk melihat task.</div>
           ) : loading ? (
             <div className="empty-state">Memuat data dari server...</div>
           ) : (
@@ -677,7 +982,7 @@ function App() {
             </div>
           )}
 
-          {meta ? (
+          {meta && viewMode === 'list' ? (
             <div className="pagination">
               <span className="tiny">
                 Menampilkan {meta.from ?? 0}-{meta.to ?? 0} dari {meta.total} task
