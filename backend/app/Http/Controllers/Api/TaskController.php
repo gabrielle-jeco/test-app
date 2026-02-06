@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Task;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 
@@ -12,21 +13,48 @@ class TaskController extends Controller
     public function index(Request $request)
     {
         $query = Task::query();
-        $search = trim((string) $request->query('search', ''));
-        $status = (string) $request->query('status', '');
+        $this->applyFilters($request, $query);
 
-        if ($search !== '') {
-            $query->where(function ($inner) use ($search) {
-                $inner->where('title', 'like', '%' . $search . '%')
-                    ->orWhere('description', 'like', '%' . $search . '%');
-            });
-        }
+        $sort = (string) $request->query('sort', 'newest');
+        $direction = $sort === 'oldest' ? 'asc' : 'desc';
 
-        if (in_array($status, ['todo', 'doing', 'done'], true)) {
-            $query->where('status', $status);
-        }
+        $perPage = (int) $request->query('per_page', 8);
+        $perPage = max(5, min($perPage, 40));
 
-        return $query->orderByDesc('created_at')->get();
+        $paginated = $query
+            ->orderBy('created_at', $direction)
+            ->paginate($perPage)
+            ->appends($request->query());
+
+        return response()->json([
+            'data' => $paginated->items(),
+            'meta' => [
+                'current_page' => $paginated->currentPage(),
+                'last_page' => $paginated->lastPage(),
+                'per_page' => $paginated->perPage(),
+                'total' => $paginated->total(),
+                'from' => $paginated->firstItem(),
+                'to' => $paginated->lastItem(),
+            ],
+        ]);
+    }
+
+    public function stats(Request $request)
+    {
+        $query = Task::query();
+        $this->applyFilters($request, $query);
+
+        $total = (clone $query)->count();
+        $todo = (clone $query)->where('status', 'todo')->count();
+        $doing = (clone $query)->where('status', 'doing')->count();
+        $done = (clone $query)->where('status', 'done')->count();
+
+        return response()->json([
+            'total' => $total,
+            'todo' => $todo,
+            'doing' => $doing,
+            'done' => $done,
+        ]);
     }
 
     public function store(Request $request)
@@ -66,5 +94,22 @@ class TaskController extends Controller
         $task->delete();
 
         return response()->noContent();
+    }
+
+    private function applyFilters(Request $request, Builder $query): void
+    {
+        $search = trim((string) $request->query('search', ''));
+        $status = (string) $request->query('status', '');
+
+        if ($search !== '') {
+            $query->where(function ($inner) use ($search) {
+                $inner->where('title', 'like', '%' . $search . '%')
+                    ->orWhere('description', 'like', '%' . $search . '%');
+            });
+        }
+
+        if (in_array($status, ['todo', 'doing', 'done'], true)) {
+            $query->where('status', $status);
+        }
     }
 }
