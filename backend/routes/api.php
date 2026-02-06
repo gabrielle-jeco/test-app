@@ -19,4 +19,7 @@ Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
     return $request->user();
 });
 
-Route::apiResource('tasks', TaskController::class);
+Route::middleware('throttle:api')->group(function () {
+    Route::get('tasks/stats', [TaskController::class, 'stats']);
+    Route::apiResource('tasks', TaskController::class);
+});
