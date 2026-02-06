@@ -12,14 +12,14 @@ class TaskController extends Controller
 {
     public function index(Request $request)
     {
-        $query = Task::query();
+        $query = Task::query()->where('user_id', $request->user()->id);
         $this->applyFilters($request, $query);
 
         $sort = (string) $request->query('sort', 'newest');
         $direction = $sort === 'oldest' ? 'asc' : 'desc';
 
         $perPage = (int) $request->query('per_page', 8);
-        $perPage = max(5, min($perPage, 40));
+        $perPage = max(5, min($perPage, 200));
 
         $paginated = $query
             ->orderBy('created_at', $direction)
@@ -41,7 +41,7 @@ class TaskController extends Controller
 
     public function stats(Request $request)
     {
-        $query = Task::query();
+        $query = Task::query()->where('user_id', $request->user()->id);
         $this->applyFilters($request, $query);
 
         $total = (clone $query)->count();
@@ -65,18 +65,22 @@ class TaskController extends Controller
             'status' => ['required', 'string', 'in:todo,doing,done'],
         ]);
 
-        $task = Task::create($data);
+        $task = new Task($data);
+        $task->user()->associate($request->user());
+        $task->save();
 
         return response()->json($task, Response::HTTP_CREATED);
     }
 
-    public function show(Task $task)
+    public function show(Request $request, Task $task)
     {
+        $this->authorizeTask($request, $task);
         return $task;
     }
 
     public function update(Request $request, Task $task)
     {
+        $this->authorizeTask($request, $task);
         $data = $request->validate([
             'title' => ['sometimes', 'string', 'max:120'],
             'description' => ['sometimes', 'nullable', 'string', 'max:1000'],
@@ -89,8 +93,9 @@ class TaskController extends Controller
         return response()->json($task);
     }
 
-    public function destroy(Task $task)
+    public function destroy(Request $request, Task $task)
     {
+        $this->authorizeTask($request, $task);
         $task->delete();
 
         return response()->noContent();
@@ -110,6 +115,13 @@ class TaskController extends Controller
 
         if (in_array($status, ['todo', 'doing', 'done'], true)) {
             $query->where('status', $status);
+        }
+    }
+
+    private function authorizeTask(Request $request, Task $task): void
+    {
+        if ($task->user_id !== $request->user()->id) {
+            abort(404);
         }
     }
 }
