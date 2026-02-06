@@ -14,6 +14,12 @@
   align-items: center;
 }
 
+.hero-side {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
 .hero-text h1 {
   font-family: 'Bricolage Grotesque', sans-serif;
   font-size: clamp(2.5rem, 4vw, 3.8rem);
@@ -46,6 +52,45 @@
   flex-direction: column;
   gap: 0.9rem;
   backdrop-filter: blur(8px);
+}
+
+.auth-card {
+  gap: 1rem;
+}
+
+.auth-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+
+.auth-toggle .ghost {
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.auth-toggle .ghost.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: #8a3417;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.auth-user {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.auth-name {
+  margin: 0;
+  font-weight: 700;
+  font-size: 1.05rem;
 }
 
 .hero-card-header {
